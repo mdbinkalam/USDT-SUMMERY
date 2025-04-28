@@ -1,65 +1,56 @@
-
-import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="USDT Price Summary", layout="wide")
-st.title("💱 USDT Price Summary (Divide Rules)")
+# Load your Excel files
+deposits = pd.read_excel('BINANCE TO COINDCX.xlsx')
+sells = pd.read_excel('COINDCX SPOT TRADE.xlsx')
 
-uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-    df.columns = [col.strip().lower() for col in df.columns]
+# --- Step 1: Format the DateTime columns properly ---
+deposits['Deposit DateTime'] = pd.to_datetime(deposits['Deposit DateTime'])
+sells['Sell DateTime'] = pd.to_datetime(sells['Sell DateTime'])
 
-    # Rename for easier access if needed
-    df = df.rename(columns={
-        "date": "date",
-        "type": "type",
-        "coin name": "coin",
-        "amount": "amount",
-        "price": "price",
-        "net amount": "net_amount",
-        "tds": "tds",
-        "usdt received": "usdt_received"
-    })
+# --- Step 2: Sort both dataframes by DateTime ---
+deposits = deposits.sort_values(by='Deposit DateTime').reset_index(drop=True)
+sells = sells.sort_values(by='Sell DateTime').reset_index(drop=True)
 
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    summary = []
+# --- Step 3: Create an empty list for results ---
+fifo_results = []
 
-    for coin, grp in df.groupby("coin"):
-        earliest_date = grp["date"].min()
-        types = grp["type"].str.upper().unique()
-        buy_sell = "Both" if len(types) == 2 else types[0]
+# --- Step 4: FIFO Matching ---
+for _, sell_row in sells.iterrows():
+    sell_coin = sell_row['Coin']
+    sell_qty = sell_row['Quantity Sold']
+    sell_datetime = sell_row['Sell DateTime']
+    sell_price = sell_row['Sell Price (INR)']
+    
+    for idx, dep_row in deposits.iterrows():
+        dep_coin = dep_row['Coin']
+        dep_qty = dep_row['Quantity Deposited']
+        dep_datetime = dep_row['Deposit DateTime']
 
-        pair = "USDT" if "USDT" in coin.upper() else "INR"
-        total_amount = grp["amount"].sum()
-        avg_price = (grp["price"] * grp["amount"]).sum() / total_amount if total_amount else 0
-        total_net = grp["net_amount"].sum()
-        tds_inr = 0 if buy_sell == "Buy" else grp["tds"].sum()
+        # Match only same coin and deposit earlier than sell
+        if dep_coin == sell_coin and dep_qty > 0 and dep_datetime <= sell_datetime:
+            qty_used = min(dep_qty, sell_qty)
+            
+            fifo_results.append({
+                'Coin': sell_coin,
+                'Deposit DateTime': dep_datetime,
+                'Sell DateTime': sell_datetime,
+                'Quantity Sold': qty_used,
+                'Sell Price (INR)': sell_price,
+                'Total Sale Value (INR)': qty_used * sell_price
+            })
+            
+            # Update quantities
+            deposits.at[idx, 'Quantity Deposited'] -= qty_used
+            sell_qty -= qty_used
+            
+            if sell_qty <= 0:
+                break  # move to next sell
 
-        usdt_price = ""
-        if buy_sell in ["Sell", "Both"] and pair == "USDT":
-            sells = grp[grp["type"].str.lower() == "sell"]
-            total_sell_amount = sells["amount"].sum()
-            total_usdt_received = sells["usdt_received"].sum()
-            avg_buy_price = (grp[grp["type"].str.lower() == "buy"]["price"] * grp[grp["type"].str.lower() == "buy"]["amount"]).sum()
-            avg_buy_price /= grp[grp["type"].str.lower() == "buy"]["amount"].sum() if not grp[grp["type"].str.lower() == "buy"]["amount"].sum() == 0 else 1
-            usdt_price = (total_sell_amount * avg_buy_price) / total_usdt_received if total_usdt_received else ""
+# --- Step 5: Create result DataFrame ---
+fifo_df = pd.DataFrame(fifo_results)
 
-        summary.append({
-            "Date": earliest_date,
-            "Buy/Sell": buy_sell,
-            "Coin": coin,
-            "Pair": pair,
-            "Amount": total_amount,
-            "Price": round(avg_price, 4),
-            "Net Amount in Base Currency": round(total_net, 2),
-            "TDS in INR": round(tds_inr, 2),
-            "USDT Price": round(usdt_price, 4) if usdt_price != "" else ""
-        })
+# --- Step 6: Save to Excel ---
+fifo_df.to_excel('FIFO_Selling_Report.xlsx', index=False)
 
-    result = pd.DataFrame(summary)
-    st.dataframe(result)
-
-    st.download_button("📥 Download Summary as Excel",
-                       data=result.to_excel(index=False),
-                       file_name="usdt_price_summary.xlsx")
+print("✅ FIFO Selling Report Generated: 'FIFO_Selling_Report.xlsx'")
